@@ -60,10 +60,13 @@ Framework rule and can install it from the panel (polkit prompt), or:
 ```sh
 sudo install -m 644 udev/50-framework-inputmodule.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
-sudo udevadm trigger --subsystem-match=tty --action=change
+sudo udevadm trigger --action=change --subsystem-match=usb \
+  --attr-match=idVendor=32ac --attr-match=idProduct=0020
 ```
 
-Unplug and replug the module if the ACL does not apply immediately.
+The rule matches only USB `32ac:0020` (the LED matrix), mode `0660` plus
+`uaccess`, so the seated session gets an ACL. Other ACM devices are not
+touched. Unplug and replug the module if the ACL does not apply immediately.
 
 `python3` is the only runtime dependency; Omarchy already has it.
 

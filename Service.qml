@@ -174,8 +174,8 @@ Item {
       "install -m 644 " + quote(udevRulePath)
         + " /etc/udev/rules.d/50-framework-inputmodule.rules"
         + " && udevadm control --reload-rules"
-        + " && udevadm trigger --subsystem-match=tty --action=change"
-        + " && chmod a+rw /dev/ttyACM* 2>/dev/null || true"
+        + " && udevadm trigger --action=change --subsystem-match=usb"
+        + " --attr-match=idVendor=32ac --attr-match=idProduct=0020"
     ]
     udevProcess.running = true
   }
