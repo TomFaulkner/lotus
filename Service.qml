@@ -107,7 +107,7 @@ Item {
   function cycleMode(delta) { setMode(Model.nextMode(settings.mode, delta || 1)) }
   function togglePower() { updateSettings({ power: !settings.power }) }
   function nudgeBrightness(delta) {
-    updateSettings({ brightness: Model.clampInt(settings.brightness + delta, settings.brightness, 0, 255) })
+    updateSettings({ brightness: Model.clampInt(settings.brightness + delta, settings.brightness, 10, 255) })
   }
 
   function flash() {

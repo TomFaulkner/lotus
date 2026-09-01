@@ -15,7 +15,7 @@ var MODES = [
 var DEFAULTS = {
   mode: "auto",
   power: true,
-  brightness: 96,
+  brightness: 180,
   sleepLocked: true,
   idleArt: "rain",
   flashNotify: true,
@@ -70,7 +70,7 @@ function normalize(raw) {
   return {
     mode: modeOr(src.mode, DEFAULTS.mode),
     power: boolOr(src.power, DEFAULTS.power),
-    brightness: clampInt(src.brightness, DEFAULTS.brightness, 0, 255),
+    brightness: clampInt(src.brightness, DEFAULTS.brightness, 10, 255),
     sleepLocked: boolOr(src.sleepLocked, DEFAULTS.sleepLocked),
     idleArt: modeOr(src.idleArt, DEFAULTS.idleArt),
     flashNotify: boolOr(src.flashNotify, DEFAULTS.flashNotify),

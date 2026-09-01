@@ -262,7 +262,7 @@ Panel {
             width: parent.width
             bar: root.bar
             value: root.ready ? root.lotus.settings.brightness : 96
-            minimum: 8
+            minimum: 10
             maximum: 255
             step: 8
             integer: true

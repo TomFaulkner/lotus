@@ -35,14 +35,18 @@ class DiscoverTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
-    def test_greyscale_frame_size(self):
+    def test_greyscale_packets_are_one_command_each(self):
         grid = L.blank(7)
-        frame = L.greyscale_frame(grid)
-        # 9 columns of magic(2)+cmd+index+34 bytes, plus flush magic+cmd+0
-        self.assertEqual(len(frame), 9 * (3 + 1 + 34) + 4)
-        self.assertEqual(frame[:3], bytes((0x32, 0xAC, 0x07)))
-        self.assertEqual(frame[3], 0)  # first column index
-        self.assertEqual(frame[-4:], bytes((0x32, 0xAC, 0x08, 0x00)))
+        packets = L.greyscale_packets(grid)
+        self.assertEqual(len(packets), 10)
+        for i in range(9):
+            pkt = packets[i]
+            self.assertEqual(len(pkt), 3 + 1 + 34)
+            self.assertLess(len(pkt), 64)
+            self.assertEqual(pkt[:3], bytes((0x32, 0xAC, 0x07)))
+            self.assertEqual(pkt[3], i)
+            self.assertEqual(pkt[4], 7)
+        self.assertEqual(packets[-1], bytes((0x32, 0xAC, 0x08, 0x00)))
 
     def test_sleep_and_brightness_packets(self):
         self.assertEqual(L.sleep_packet(True), bytes((0x32, 0xAC, 0x03, 1)))

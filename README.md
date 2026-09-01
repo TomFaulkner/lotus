@@ -74,6 +74,9 @@ Unplug and replug the module if the ACL does not apply immediately.
 - Scroll: brightness
 - In the panel, arrows pick a mode, enter applies it, left/right dim or brighten, space sleeps
 
+Pixel values below about 10 do not show on this module. Lotus keeps
+global brightness in the 10–255 range for that reason.
+
 IPC, if you want a keybind:
 
 ```lua

@@ -26,6 +26,7 @@ MAGIC = bytes((0x32, 0xAC))
 CMD_BRIGHTNESS = 0x00
 CMD_PATTERN = 0x01
 CMD_SLEEP = 0x03
+CMD_ANIMATE = 0x04
 CMD_STAGE_COL = 0x07
 CMD_FLUSH_COLS = 0x08
 VID = "32ac"
@@ -130,13 +131,23 @@ def sleep_packet(sleeping: bool) -> bytes:
     return packet(CMD_SLEEP, [1 if sleeping else 0])
 
 
-def greyscale_frame(grid: list[list[int]]) -> bytes:
-    chunks: list[bytes] = []
+def animate_packet(on: bool) -> bytes:
+    return packet(CMD_ANIMATE, [1 if on else 0])
+
+
+def greyscale_packets(grid: list[list[int]]) -> list[bytes]:
+    """One USB packet per command.
+
+    The firmware reads at most 64 bytes per poll and only parses a command
+    if it starts at byte 0 of that read. A concatenated 346-byte frame is
+    split on 64-byte boundaries, so columns 1–8 never land.
+    """
+    packets: list[bytes] = []
     for x in range(WIDTH):
         col = [int(clamp(v, 0, 255)) for v in grid[x]]
-        chunks.append(packet(CMD_STAGE_COL, [x] + col))
-    chunks.append(packet(CMD_FLUSH_COLS, [0x00]))
-    return b"".join(chunks)
+        packets.append(packet(CMD_STAGE_COL, [x] + col))
+    packets.append(packet(CMD_FLUSH_COLS, [0x00]))
+    return packets
 
 
 def local_now(ts: float | None = None):
@@ -417,7 +428,7 @@ def apply_message(state: State, msg: dict, ts: float) -> State:
     if "power" in msg:
         state.power = bool(msg["power"])
     if "brightness" in msg:
-        state.brightness = int(clamp(int(msg["brightness"]), 0, 255))
+        state.brightness = int(clamp(int(msg["brightness"]), 10, 255))
     if "idle" in msg:
         state.idle = bool(msg["idle"])
     if "locked" in msg:
@@ -487,7 +498,7 @@ class Device:
     fd: int | None = None
     last_brightness: int | None = None
     sleeping: bool | None = None
-    last_frame: bytes | None = None
+    last_frame: tuple[bytes, ...] | None = None
     last_write: float = 0.0
 
     def as_dict(self) -> dict:
@@ -570,6 +581,8 @@ def write_all(fd: int, data: bytes) -> None:
         if n <= 0:
             raise OSError("short write")
         view = view[n:]
+    # Push this command out as its own USB transfer before the next one.
+    termios.tcdrain(fd)
 
 
 class Hardware:
@@ -605,6 +618,12 @@ class Hardware:
             except OSError:
                 next_devs.append(dev)
             else:
+                try:
+                    write_all(dev.fd, sleep_packet(False))
+                    write_all(dev.fd, animate_packet(False))
+                    dev.sleeping = False
+                except OSError:
+                    self._close(dev)
                 next_devs.append(dev)
         for old in self.devices:
             if old.path not in {d["path"] for d in wanted}:
@@ -630,7 +649,7 @@ class Hardware:
         self.devices = []
 
     def push(self, grid: list[list[int]], brightness: int, sleeping: bool, ts: float) -> None:
-        frame = b"" if sleeping else greyscale_frame(grid)
+        frame = () if sleeping else tuple(greyscale_packets(grid))
         for dev in self.devices:
             if dev.fd is None:
                 continue
@@ -650,7 +669,8 @@ class Hardware:
                     write_all(dev.fd, brightness_packet(brightness))
                     dev.last_brightness = brightness
                 if frame != dev.last_frame or ts - dev.last_write > KEEPALIVE_S:
-                    write_all(dev.fd, frame)
+                    for pkt in frame:
+                        write_all(dev.fd, pkt)
                     dev.last_frame = frame
                     dev.last_write = ts
             except OSError:
