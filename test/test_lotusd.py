@@ -156,6 +156,27 @@ class RenderTests(unittest.TestCase):
         body = sum(grid[x][y] for x in range(1, 8) for y in range(34))
         self.assertGreater(body, 20 * 200)
 
+    def test_trek_walker_on_ground(self):
+        a = L.render_trek(0.0, 0.0)
+        b = L.render_trek(8.0, 1.0)
+        self.assertEqual(len(a), 9)
+        self.assertEqual(len(a[0]), 34)
+        # Ground is physical x=0 (logical bottom)
+        self.assertGreater(sum(a[0]), 0)
+        # Walker sits above the ground
+        self.assertGreater(sum(a[x][L.WALKER_X] for x in range(1, 9)), 0)
+        self.assertNotEqual(a, b)
+
+    def test_chomp_eats_ahead_of_mouth(self):
+        closed = L.render_chomp(0.0, 0.0)
+        opened = L.render_chomp(0.0, 2.0)
+        later = L.render_chomp(6.0, 0.0)
+        self.assertEqual(len(closed), 9)
+        # Body sits above the empty bottom padding
+        self.assertGreater(sum(closed[x][L.CHOMP_X + 3] for x in range(9)), 0)
+        self.assertNotEqual(closed, opened)
+        self.assertNotEqual(closed, later)
+
 
 if __name__ == "__main__":
     unittest.main()

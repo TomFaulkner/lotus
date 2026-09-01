@@ -44,6 +44,8 @@ MODES = (
     "spaces",
     "lotus",
     "word",
+    "trek",
+    "chomp",
     "rain",
     "meter",
     "breathe",
@@ -117,6 +119,77 @@ def blit_rotated(grid: list[list[int]], lx: int, ly: int, value: int) -> None:
     logical (lx, ly) → physical (8 - ly, lx).
     """
     set_px(grid, (WIDTH - 1) - ly, lx, value)
+
+
+# 5×8 walkers, top row first. ly=0 is the top of the sprite (module right).
+WALK_A = (
+    ".##..",
+    "####.",
+    ".##..",
+    "#####",
+    ".#.#.",
+    ".##..",
+    "#..#.",
+    "##..#",
+)
+WALK_B = (
+    ".##..",
+    "####.",
+    ".##..",
+    "#####",
+    ".#.#.",
+    ".##..",
+    ".#..#",
+    ".#.##",
+)
+WALK_TONE = (240, 210, 190, 175, 160, 150, 145, 140)
+GROUND_TONE = 70
+HILL_TONE = 115
+# Looping skyline: 1 = floor, 2 = step. Length 34 so one screen is one loop.
+TREK_WORLD = (
+    1, 1, 1, 1, 1, 1, 1, 2, 2, 2,
+    1, 1, 1, 1, 2, 2, 1, 1, 1, 1,
+    1, 1, 2, 2, 2, 2, 1, 1, 1, 1,
+    1, 1, 1, 1,
+)
+WALKER_X = 6
+
+# 7×7 disc, facing +lx, mouth on the right. Closed / half / open.
+CHOMP_FRAMES = (
+    (
+        "..###..",
+        ".#####.",
+        "#######",
+        "#######",
+        "#######",
+        ".#####.",
+        "..###..",
+    ),
+    (
+        "..###..",
+        ".#####.",
+        "######.",
+        "#####..",
+        "######.",
+        ".#####.",
+        "..###..",
+    ),
+    (
+        "..###..",
+        ".#####.",
+        "#####..",
+        "###....",
+        "#####..",
+        ".#####.",
+        "..###..",
+    ),
+)
+CHOMP_X = 3
+CHOMP_TOP = 1
+CHOMP_BODY = 230
+PELLET = 90
+POWER_PELLET = 220
+DOT_LANE = 4
 
 
 def blit_word(grid: list[list[int]], text: str, value: int = 230) -> None:
@@ -326,6 +399,73 @@ class Drop:
     bright: int
 
 
+class Trek:
+    def __init__(self) -> None:
+        self.scroll = 0.0
+        self.phase = 0.0
+
+    def step(self, dt: float) -> list[list[int]]:
+        self.scroll = (self.scroll + dt * 10.0) % len(TREK_WORLD)
+        self.phase += dt * 7.0
+        return render_trek(self.scroll, self.phase)
+
+
+def terrain_at(scroll: float, lx: int) -> int:
+    i = (int(scroll) + lx) % len(TREK_WORLD)
+    return TREK_WORLD[i]
+
+
+def render_trek(scroll: float, phase: float) -> list[list[int]]:
+    grid = new_grid()
+    for lx in range(HEIGHT):
+        height = terrain_at(scroll, lx)
+        blit_rotated(grid, lx, 8, GROUND_TONE)
+        if height >= 2:
+            blit_rotated(grid, lx, 7, HILL_TONE)
+    stand = terrain_at(scroll, WALKER_X)
+    foot = 8 - stand
+    frames = WALK_A if int(phase) % 2 == 0 else WALK_B
+    for dy, row in enumerate(frames):
+        ly = foot - (len(frames) - 1 - dy)
+        tone = WALK_TONE[dy] if dy < len(WALK_TONE) else 160
+        for dx, bit in enumerate(row):
+            if bit == "#":
+                blit_rotated(grid, WALKER_X + dx, ly, tone)
+    return grid
+
+
+class Chomp:
+    def __init__(self) -> None:
+        self.scroll = 0.0
+        self.phase = 0.0
+
+    def step(self, dt: float) -> list[list[int]]:
+        self.scroll = (self.scroll + dt * 12.0) % 24.0
+        self.phase += dt * 10.0
+        return render_chomp(self.scroll, self.phase)
+
+
+def render_chomp(scroll: float, phase: float) -> list[list[int]]:
+    grid = new_grid()
+    mouth = CHOMP_X + 6
+    for lx in range(mouth + 1, HEIGHT):
+        world = int(scroll) + lx
+        if world % 12 == 0:
+            blit_rotated(grid, lx, DOT_LANE, POWER_PELLET)
+            blit_rotated(grid, lx, DOT_LANE - 1, POWER_PELLET)
+            blit_rotated(grid, lx, DOT_LANE + 1, POWER_PELLET)
+        elif world % 3 == 0:
+            blit_rotated(grid, lx, DOT_LANE, PELLET)
+    # 0,1,2,1,0,1,2… so the mouth snaps shut
+    cycle = int(phase) % 4
+    frame = (0, 1, 2, 1)[cycle]
+    for dy, row in enumerate(CHOMP_FRAMES[frame]):
+        for dx, bit in enumerate(row):
+            if bit == "#":
+                blit_rotated(grid, CHOMP_X + dx, CHOMP_TOP + dy, CHOMP_BODY)
+    return grid
+
+
 class Rain:
     def __init__(self, rng: Callable[[], float] | None = None) -> None:
         self.rng = rng or (lambda: os.urandom(1)[0] / 255.0)
@@ -506,7 +646,15 @@ def apply_message(state: State, msg: dict, ts: float) -> State:
     return state
 
 
-def render(state: State, ts: float, rain: Rain, meter: Meter, dt: float) -> tuple[str, list[list[int]]]:
+def render(
+    state: State,
+    ts: float,
+    rain: Rain,
+    meter: Meter,
+    trek: Trek,
+    chomp: Chomp,
+    dt: float,
+) -> tuple[str, list[list[int]]]:
     mode = pick_mode(state, ts)
     if mode == "off":
         return mode, new_grid()
@@ -520,6 +668,10 @@ def render(state: State, ts: float, rain: Rain, meter: Meter, dt: float) -> tupl
         return mode, render_lotus(state, ts)
     if mode == "word":
         return mode, render_word(state, ts)
+    if mode == "trek":
+        return mode, trek.step(dt)
+    if mode == "chomp":
+        return mode, chomp.step(dt)
     if mode == "rain":
         return mode, rain.step(dt)
     if mode == "meter":
@@ -744,6 +896,8 @@ def run_daemon() -> int:
     state = State()
     rain = Rain()
     meter = Meter()
+    trek = Trek()
+    chomp = Chomp()
     hw = Hardware()
     buf = ""
     last_tick = time.time()
@@ -777,14 +931,14 @@ def run_daemon() -> int:
                         return 0
                     apply_message(state, msg, ts)
                     hw.refresh(ts, force=True)
-                    mode, grid = render(state, ts, rain, meter, 0.05)
+                    mode, grid = render(state, ts, rain, meter, trek, chomp, 0.05)
                     emit(status_payload(hw, mode, state))
                     emit({"type": "preview", "w": WIDTH, "h": HEIGHT, "px": encode_preview(grid)})
                     last_preview = ts
             dt = max(0.001, ts - last_tick)
             last_tick = ts
             hw.refresh(ts)
-            mode, grid = render(state, ts, rain, meter, dt)
+            mode, grid = render(state, ts, rain, meter, trek, chomp, dt)
             sleeping = mode == "off"
             hw.push(grid, state.brightness, sleeping, ts)
             if mode != last_mode:
@@ -817,7 +971,9 @@ def main(argv: list[str] | None = None) -> int:
         ])
         rain = Rain(rng=lambda: 0.3)
         meter = Meter()
-        mode, grid = render(state, 1.0, rain, meter, 0.05)
+        trek = Trek()
+        chomp = Chomp()
+        mode, grid = render(state, 1.0, rain, meter, trek, chomp, 0.05)
         print(mode)
         for y in range(HEIGHT):
             print("".join(".#"[grid[x][y] > 40] for x in range(WIDTH)))

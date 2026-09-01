@@ -7,6 +7,8 @@ var MODES = [
   { id: "spaces", label: "Spaces", hint: "Hyprland workspaces" },
   { id: "lotus", label: "Lotus", hint: "Breathing bloom" },
   { id: "word", label: "Omarchy", hint: "OMARCHY along the long edge" },
+  { id: "trek", label: "Trek", hint: "Tiny walker, long edge" },
+  { id: "chomp", label: "Chomp", hint: "Disc with a mouth, eats dots" },
   { id: "rain", label: "Rain", hint: "Falling sparks" },
   { id: "meter", label: "Meter", hint: "Per-core load" },
   { id: "breathe", label: "Breathe", hint: "Full-panel pulse" },

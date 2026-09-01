@@ -23,6 +23,8 @@ it awake so the firmware's idle timer does not blank the panel.
 | **Spaces** | Hyprland workspaces 1–10, focused vs occupied |
 | **Lotus** | A breathing bloom — the thing this module was born showing |
 | **Omarchy** | OMARCHY along the long edge, right side as the top of the letters |
+| **Trek** | Tiny walker on a looping strip — same 34×9 orientation as Omarchy |
+| **Chomp** | Disc with a mouth, eating dots along the long edge |
 | **Rain** | Falling sparks, used as the idle screensaver |
 | **Meter** | Per-core load, nine columns, peak hold |
 | **Breathe** | Full-panel pulse |
