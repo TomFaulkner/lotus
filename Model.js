@@ -6,6 +6,7 @@ var MODES = [
   { id: "battery", label: "Battery", hint: "Charge as a cell" },
   { id: "spaces", label: "Spaces", hint: "Hyprland workspaces" },
   { id: "lotus", label: "Lotus", hint: "Breathing bloom" },
+  { id: "word", label: "Omarchy", hint: "OMARCHY along the long edge" },
   { id: "rain", label: "Rain", hint: "Falling sparks" },
   { id: "meter", label: "Meter", hint: "Per-core load" },
   { id: "breathe", label: "Breathe", hint: "Full-panel pulse" },

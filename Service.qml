@@ -245,7 +245,7 @@ Item {
 
   IpcHandler {
     target: "io.github.tomfaulkner.lotus"
-    function toggle(): void { root.togglePower() }
+    function sleep(): void { root.togglePower() }
     function cycle(): void { root.cycleMode(1) }
     function mode(name: string): void { root.setMode(name) }
     function brighter(): void { root.nudgeBrightness(16) }

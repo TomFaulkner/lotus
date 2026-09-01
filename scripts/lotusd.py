@@ -43,13 +43,14 @@ MODES = (
     "battery",
     "spaces",
     "lotus",
+    "word",
     "rain",
     "meter",
     "breathe",
     "off",
 )
 
-# 4x7 digits. Two of them plus a 1-column gap fill the 9-wide matrix.
+# 4x7 glyphs. Seven letters at 4px + 1px gaps fill the 34-long edge exactly.
 DIGITS = {
     "0": ("0110", "1001", "1001", "1001", "1001", "1001", "0110"),
     "1": ("0010", "0110", "0010", "0010", "0010", "0010", "0111"),
@@ -63,6 +64,13 @@ DIGITS = {
     "9": ("0110", "1001", "1001", "0111", "0001", "0001", "0110"),
     " ": ("0000", "0000", "0000", "0000", "0000", "0000", "0000"),
     "-": ("0000", "0000", "0000", "1111", "0000", "0000", "0000"),
+    "A": ("0110", "1001", "1001", "1111", "1001", "1001", "1001"),
+    "C": ("0110", "1001", "1000", "1000", "1000", "1001", "0110"),
+    "H": ("1001", "1001", "1001", "1111", "1001", "1001", "1001"),
+    "M": ("1001", "1101", "1011", "1001", "1001", "1001", "1001"),
+    "O": ("0110", "1001", "1001", "1001", "1001", "1001", "0110"),
+    "R": ("1110", "1001", "1001", "1110", "1010", "1001", "1001"),
+    "Y": ("1001", "1001", "1001", "0110", "0010", "0010", "0010"),
 }
 
 
@@ -100,6 +108,28 @@ def blit_pair(grid: list[list[int]], text: str, oy: int, value: int = 220) -> No
     text = (text + "  ")[:2]
     blit_digit(grid, text[0], 0, oy, value)
     blit_digit(grid, text[1], 5, oy, value)
+
+
+def blit_rotated(grid: list[list[int]], lx: int, ly: int, value: int) -> None:
+    """Logical 34×9 (lx along the long edge, ly=0 at the top of the letters).
+
+    The module is 9×34 portrait; treating the right edge as top maps
+    logical (lx, ly) → physical (8 - ly, lx).
+    """
+    set_px(grid, (WIDTH - 1) - ly, lx, value)
+
+
+def blit_word(grid: list[list[int]], text: str, value: int = 230) -> None:
+    """Draw a 4×7 caps word along the long edge. 7 letters + 6 gaps = 34."""
+    text = text.upper()
+    pad = (WIDTH - 7) // 2
+    for i, ch in enumerate(text):
+        rows = DIGITS.get(ch, DIGITS[" "])
+        ox = i * 5
+        for dy, row in enumerate(rows):
+            for dx, bit in enumerate(row):
+                if bit == "1":
+                    blit_rotated(grid, ox + dx, pad + dy, value)
 
 
 def encode_preview(grid: list[list[int]]) -> str:
@@ -219,18 +249,29 @@ def render_spaces(state: "State", ts: float) -> list[list[int]]:
         focused = bool(ws.get("focused"))
         occupied = bool(ws.get("occupied"))
         if focused:
-            fill = 230
-            border = 230
+            fill, border, halo = 255, 255, 70
         elif occupied:
-            fill = 40
-            border = 160
+            fill, border, halo = 0, 55, 0
         else:
-            fill = 0
-            border = 45
+            fill, border, halo = 0, 18, 0
         for x in range(col, col + 3):
             for y in range(row, row + 4):
                 edge = x in (col, col + 2) or y in (row, row + 3)
                 set_px(grid, x, y, border if edge else fill)
+        if halo:
+            for x in range(col - 1, col + 4):
+                set_px(grid, x, row - 1, halo)
+                set_px(grid, x, row + 4, halo)
+            for y in range(row, row + 4):
+                set_px(grid, col - 1, y, halo)
+                set_px(grid, col + 3, y, halo)
+    return grid
+
+
+def render_word(_state: "State", ts: float) -> list[list[int]]:
+    grid = new_grid()
+    breath = 0.82 + 0.18 * math.sin(ts * 1.15)
+    blit_word(grid, "OMARCHY", int(230 * breath))
     return grid
 
 
@@ -477,6 +518,8 @@ def render(state: State, ts: float, rain: Rain, meter: Meter, dt: float) -> tupl
         return mode, render_spaces(state, ts)
     if mode == "lotus":
         return mode, render_lotus(state, ts)
+    if mode == "word":
+        return mode, render_word(state, ts)
     if mode == "rain":
         return mode, rain.step(dt)
     if mode == "meter":

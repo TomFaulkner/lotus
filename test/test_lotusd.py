@@ -132,12 +132,29 @@ class RenderTests(unittest.TestCase):
         state = L.State(
             workspaces=[
                 {"id": 1, "occupied": True, "focused": True},
-                {"id": 2, "occupied": False, "focused": False},
+                {"id": 2, "occupied": True, "focused": False},
             ]
         )
         grid = L.render_spaces(state, 0.0)
-        # focused cell starts at col 1, row 2
-        self.assertGreater(grid[1][2], 100)
+        focused = grid[2][3]
+        occupied = grid[1][8]
+        self.assertEqual(focused, 255)
+        self.assertLess(occupied, 80)
+        self.assertGreater(focused - occupied, 170)
+
+    def test_omarchy_fits_rotated(self):
+        grid = L.render_word(L.State(), 0.0)
+        self.assertEqual(len(grid), 9)
+        self.assertEqual(len(grid[0]), 34)
+        # 4px glyphs + 1px gaps, 7 letters: last column of Y is x=33
+        self.assertGreater(sum(grid[x][33] for x in range(9)), 0)
+        self.assertGreater(sum(grid[x][0] for x in range(9)), 0)
+        # 1px padding: physical x=0 (left / bottom of letters) stays dark
+        self.assertEqual(sum(grid[0]), 0)
+        # Right edge is the top of the letters — padding, so x=8 is also dark
+        self.assertEqual(sum(grid[8]), 0)
+        body = sum(grid[x][y] for x in range(1, 8) for y in range(34))
+        self.assertGreater(body, 20 * 200)
 
 
 if __name__ == "__main__":

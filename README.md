@@ -22,6 +22,7 @@ it awake so the firmware's idle timer does not blank the panel.
 | **Battery** | Two-digit charge and a filling cell |
 | **Spaces** | Hyprland workspaces 1–10, focused vs occupied |
 | **Lotus** | A breathing bloom — the thing this module was born showing |
+| **Omarchy** | OMARCHY along the long edge, right side as the top of the letters |
 | **Rain** | Falling sparks, used as the idle screensaver |
 | **Meter** | Per-core load, nine columns, peak hold |
 | **Breathe** | Full-panel pulse |
@@ -68,7 +69,7 @@ Unplug and replug the module if the ACL does not apply immediately.
 
 ## Controls
 
-- Left click the bar mark: open the panel
+- Left click the bar mark: open the panel (modes, brightness, sleep)
 - Right click: cycle modes
 - Middle click: sleep / wake
 - Scroll: brightness
@@ -84,7 +85,8 @@ o.bind("SUPER + CTRL + L", "Lotus", "omarchy-shell io.github.tomfaulkner.lotus c
 ```
 
 ```sh
-omarchy-shell io.github.tomfaulkner.lotus toggle
+omarchy-shell io.github.tomfaulkner.lotus cycle
+omarchy-shell io.github.tomfaulkner.lotus sleep
 omarchy-shell io.github.tomfaulkner.lotus flash
 omarchy-shell io.github.tomfaulkner.lotus status
 ```
@@ -106,7 +108,7 @@ stays in `/etc/udev/rules.d/` until you remove that file yourself.
 manifest.json     kinds, entry points, bar widget metadata
 Service.qml       daemon lifecycle, Hyprland / battery / idle / notifications
 BarWidget.qml     9×34 mark on the bar
-Panel.qml         mode picker and brightness
+LotusPanel.qml    mode picker and brightness
 MatrixPreview.qml shared LED canvas
 Model.js          settings and mode list
 scripts/lotusd.py serial protocol and renderers
@@ -128,4 +130,9 @@ can open.
 
 ## Marketplace
 
-Category **Hardware**. Tags: `bar`, `hyprland`, `theme`.
+Category **Hardware**. Tags: `bar`, `hyprland`, `workspaces`.
+
+## License
+
+MIT. See [LICENSE](LICENSE). The udev rule is Framework Computer's
+input-module access rule.

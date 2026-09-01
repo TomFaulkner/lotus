@@ -10,49 +10,21 @@ BarWidget {
     ? bar.shell.serviceFor(moduleName)
     : null
 
-  readonly property bool opened: panelLoader.item
-    ? panelLoader.item.opened === true
-    : false
-  readonly property bool popoutSwitchClosing: panelLoader.item
-    ? panelLoader.item.popoutSwitchClosing === true
-    : false
+  readonly property bool opened: lotusPanel.opened === true
+  readonly property bool popoutSwitchClosing: lotusPanel.popoutSwitchClosing === true
   readonly property real openPanelIndicatorWidth: content.implicitWidth
   readonly property real openPanelIndicatorHeight: content.implicitHeight
   readonly property bool ready: !!lotus && lotus.initialized === true
   readonly property color led: bar ? bar.barForeground : Color.foreground
 
-  function injectPanel() {
-    var target = panelLoader.item
-    if (!target) return
-    if ("bar" in target) target.bar = root.bar
-    if ("settings" in target) target.settings = root.settings
-    if ("anchorItem" in target) target.anchorItem = button
-    if ("hostWidget" in target) target.hostWidget = root
-    if ("lotus" in target) target.lotus = root.lotus
-  }
-
-  function open() { if (panelLoader.item) panelLoader.item.open() }
-  function close() { if (panelLoader.item) panelLoader.item.close() }
-  function toggle() { if (panelLoader.item) panelLoader.item.toggle() }
-  function closeForPopoutSwitch() {
-    if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
-  }
+  function open() { lotusPanel.open() }
+  function close() { lotusPanel.close() }
+  function toggle() { lotusPanel.toggle() }
+  function togglePanel() { lotusPanel.toggle() }
+  function closeForPopoutSwitch() { lotusPanel.closeForPopoutSwitch() }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
-
-  onBarChanged: Qt.callLater(injectPanel)
-  onSettingsChanged: Qt.callLater(injectPanel)
-  onLotusChanged: Qt.callLater(injectPanel)
-  Component.onCompleted: Qt.callLater(injectPanel)
-
-  Loader {
-    id: panelLoader
-    active: true
-    source: Qt.resolvedUrl("Panel.qml")
-    visible: false
-    onLoaded: root.injectPanel()
-  }
 
   WidgetButton {
     id: button
@@ -62,7 +34,7 @@ BarWidget {
     hasVisualContent: true
     dimmed: root.ready && (!root.lotus.settings.power || root.lotus.activeMode === "off")
     tooltipText: root.ready
-      ? ("Lotus · " + root.lotus.statusLabel)
+      ? ("Lotus · " + root.lotus.statusLabel + "\nLeft: panel · Right: next mode · Middle: sleep · Scroll: brightness")
       : "Lotus"
     fixedWidth: root.vertical
       ? -1
@@ -72,10 +44,9 @@ BarWidget {
       : -1
 
     onPressed: function(buttonCode) {
-      if (!root.ready) return
-      if (buttonCode === Qt.LeftButton) root.toggle()
-      else if (buttonCode === Qt.RightButton) root.lotus.cycleMode(1)
-      else if (buttonCode === Qt.MiddleButton) root.lotus.togglePower()
+      if (buttonCode === Qt.LeftButton) root.togglePanel()
+      else if (buttonCode === Qt.RightButton && root.ready) root.lotus.cycleMode(1)
+      else if (buttonCode === Qt.MiddleButton && root.ready) root.lotus.togglePower()
     }
     onWheelMoved: function(delta) {
       if (root.ready) root.lotus.nudgeBrightness(delta > 0 ? 16 : -16)
@@ -83,6 +54,7 @@ BarWidget {
 
     MatrixPreview {
       id: content
+      z: -1
       anchors.centerIn: parent
       pixels: root.ready ? root.lotus.pixels : []
       columns: 9
@@ -92,5 +64,14 @@ BarWidget {
       gap: root.vertical ? 1 : 0
       led: root.led
     }
+  }
+
+  LotusPanel {
+    id: lotusPanel
+    bar: root.bar
+    settings: root.settings
+    anchorItem: button
+    hostWidget: root
+    lotus: root.lotus
   }
 }
