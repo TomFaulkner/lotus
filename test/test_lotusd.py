@@ -178,5 +178,16 @@ class RenderTests(unittest.TestCase):
         self.assertNotEqual(closed, later)
 
 
+class UdevInstallTests(unittest.TestCase):
+    def test_service_embeds_constant_rule_bytes(self):
+        rule = (ROOT / "udev/50-framework-inputmodule.rules").read_bytes()
+        qml = (ROOT / "Service.qml").read_text()
+        self.assertIn(rule.hex(), qml)
+        self.assertNotIn("udevRulePath", qml)
+        self.assertNotIn("/bin/sh", qml)
+        self.assertIn('"pkexec", "python3", "-c"', qml)
+        self.assertNotIn("install -m 644", qml)
+
+
 if __name__ == "__main__":
     unittest.main()

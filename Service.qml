@@ -20,7 +20,9 @@ Item {
   readonly property string settingsPath: stateDir + "/lotus.json"
   readonly property string pluginDir: Model.fileUrlToPath(Qt.resolvedUrl("."))
   readonly property string daemonPath: pluginDir + "/scripts/lotusd.py"
-  readonly property string udevRulePath: pluginDir + "/udev/50-framework-inputmodule.rules"
+  // Exact bytes of udev/50-framework-inputmodule.rules. Written from this
+  // argv after pkexec; the plugin-tree copy is never opened as root.
+  readonly property string udevRuleHex: "23204672616d65776f726b204c6170746f70203136204c4544204d617472697820496e707574204d6f64756c65206f6e6c79202855534220333261633a30303230292e0a23204d4f44452030363630202b20756163636573733a20746865207365617465642075736572206765747320616e2041434c3b206f746865722074747941434d20646576696365730a2320617265206c65667420616c6f6e652e0a53554253595354454d533d3d22757362222c2041545452537b696456656e646f727d3d3d2233326163222c2041545452537b696450726f647563747d3d3d2230303230222c204d4f44453d2230363630222c205441472b3d2275616363657373220a"
 
   property var settings: Model.normalize(null)
   property bool initialized: false
@@ -170,18 +172,20 @@ Item {
     if (udevProcess.running) return
     lastError = "Asking for permission to install the LED matrix udev rule…"
     udevProcess.command = [
-      "pkexec", "/bin/sh", "-c",
-      "install -m 644 " + quote(udevRulePath)
-        + " /etc/udev/rules.d/50-framework-inputmodule.rules"
-        + " && udevadm control --reload-rules"
-        + " && udevadm trigger --action=change --subsystem-match=usb"
-        + " --attr-match=idVendor=32ac --attr-match=idProduct=0020"
+      "pkexec", "python3", "-c",
+      "import os, pathlib, subprocess\n"
+        + "rule = bytes.fromhex(" + JSON.stringify(udevRuleHex) + ")\n"
+        + "dest = pathlib.Path('/etc/udev/rules.d/50-framework-inputmodule.rules')\n"
+        + "tmp = dest.with_name('.50-framework-inputmodule.rules.tmp')\n"
+        + "tmp.write_bytes(rule)\n"
+        + "os.chmod(tmp, 0o644)\n"
+        + "os.replace(tmp, dest)\n"
+        + "subprocess.check_call(['udevadm', 'control', '--reload-rules'])\n"
+        + "subprocess.check_call(['udevadm', 'trigger', '--action=change',"
+        + " '--subsystem-match=usb', '--attr-match=idVendor=32ac',"
+        + " '--attr-match=idProduct=0020'])\n"
     ]
     udevProcess.running = true
-  }
-
-  function quote(s) {
-    return "'" + String(s).replace(/'/g, "'\\''") + "'"
   }
 
   function scheduleSettingsSave() {

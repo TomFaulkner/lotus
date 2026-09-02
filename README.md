@@ -56,11 +56,17 @@ omarchy bar move io.github.tomfaulkner.lotus --section center
 ### LED matrix access
 
 The module shows up as `/dev/ttyACM*` (`32ac:0020`). A one-time udev
-rule lets your session open it without root. Lotus ships the official
-Framework rule and can install it from the panel (polkit prompt), or:
+rule lets your session open it without root. The panel can write that
+rule through a polkit prompt (fixed bytes, not a copy of the plugin
+tree). By hand:
 
 ```sh
-sudo install -m 644 udev/50-framework-inputmodule.rules /etc/udev/rules.d/
+sudo tee /etc/udev/rules.d/50-framework-inputmodule.rules >/dev/null <<'EOF'
+# Framework Laptop 16 LED Matrix Input Module only (USB 32ac:0020).
+# MODE 0660 + uaccess: the seated user gets an ACL; other ttyACM devices
+# are left alone.
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="32ac", ATTRS{idProduct}=="0020", MODE="0660", TAG+="uaccess"
+EOF
 sudo udevadm control --reload-rules
 sudo udevadm trigger --action=change --subsystem-match=usb \
   --attr-match=idVendor=32ac --attr-match=idProduct=0020
