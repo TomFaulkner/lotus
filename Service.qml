@@ -27,9 +27,10 @@ Item {
   property var settings: Model.normalize(null)
   property bool initialized: false
   property bool settingsFileLoaded: false
-  property bool stateDirReady: false
   property bool settingsSavePending: false
   property string loadedSettingsText: ""
+  property int restartDelayMs: 1500
+  property double lastBeatMs: 0
 
   property var pixels: []
   property string activeMode: "clock"
@@ -38,6 +39,11 @@ Item {
   property string lastError: ""
   property int notifySerial: 0
   property int lastPopupCount: 0
+  readonly property int previewBytes: 306
+  readonly property int maxDevices: 4
+  readonly property int maxLineChars: 8192
+  readonly property int maxFieldChars: 64
+  readonly property int watchdogMs: 5000
 
   readonly property var idleService: shell ? shell.serviceFor("omarchy.idle") : null
   readonly property var lockService: shell ? shell.serviceFor("omarchy.lock") : null
@@ -147,19 +153,53 @@ Item {
   }
 
   function handleLine(line) {
+    if (!line || String(line).length > maxLineChars) return
     var msg = null
     try { msg = JSON.parse(line) } catch (e) { return }
     if (!msg || typeof msg !== "object") return
-    if (msg.type === "preview" && msg.px) {
-      pixels = decodePixels(msg.px)
+    if (msg.type === "preview") {
+      var px = decodePixels(msg.px)
+      if (px) {
+        pixels = px
+        noteBeat()
+      }
     } else if (msg.type === "status") {
-      activeMode = String(msg.mode || activeMode)
-      devices = msg.devices || []
+      var mode = String(msg.mode || "")
+      if (mode === "notify" || Model.modeIndex(mode) >= 0) activeMode = mode
+      devices = sanitizeDevices(msg.devices)
       permission = msg.permission !== false
       lastError = ""
+      noteBeat()
     } else if (msg.type === "error") {
-      lastError = String(msg.message || "daemon error")
+      lastError = String(msg.message || "daemon error").slice(0, 200)
     }
+  }
+
+  function sanitizeDevices(list) {
+    if (!list || !list.length) return []
+    var out = []
+    for (var i = 0; i < list.length && out.length < maxDevices; i++) {
+      var d = list[i]
+      if (!d || typeof d !== "object") continue
+      out.push({
+        path: String(d.path || "").slice(0, maxFieldChars),
+        panel: String(d.panel || "").slice(0, maxFieldChars),
+        serial: String(d.serial || "").slice(0, maxFieldChars),
+        open: d.open === true
+      })
+    }
+    return out
+  }
+
+  function noteBeat() {
+    lastBeatMs = Date.now()
+    restartDelayMs = 1500
+  }
+
+  function killDaemon() {
+    if (!daemon.running) return
+    daemon.signal(15)
+    killEscalateTimer.restart()
   }
 
   function ensureDaemon() {
@@ -195,9 +235,10 @@ Item {
   }
 
   function flushSettings() {
-    if (!settingsSavePending || !stateDirReady) return
+    if (!settingsSavePending || settingsSaveProcess.running) return
     settingsSavePending = false
-    settingsFile.setText(JSON.stringify(settings, null, 2) + "\n")
+    settingsSaveProcess.command = ["python3", "-u", daemonPath, "--save-settings"]
+    settingsSaveProcess.running = true
   }
 
   function initializeIfReady() {
@@ -215,6 +256,7 @@ Item {
 
   function decodePixels(b64) {
     var raw = Qt.atob(String(b64 || ""))
+    if (raw.length !== previewBytes) return null
     var out = []
     for (var i = 0; i < raw.length; i++) out.push(raw.charCodeAt(i) & 255)
     return out
@@ -237,14 +279,10 @@ Item {
   onWorkspacesChanged: if (initialized) pushState()
 
   Component.onCompleted: {
-    stateDirProcess.running = true
-    ensureDaemon()
+    settingsLoadProcess.running = true
   }
   Component.onDestruction: {
-    if (daemon.running) {
-      daemon.write(JSON.stringify({ op: "quit" }) + "\n")
-      daemon.signal(15)
-    }
+    if (daemon.running) daemon.signal(15)
   }
 
   IpcHandler {
@@ -267,23 +305,43 @@ Item {
     }
     stderr: SplitParser {
       onRead: function(value) {
-        if (value) root.lastError = value
+        if (value) root.lastError = String(value).slice(0, 200)
       }
     }
-    onStarted: Qt.callLater(function() { root.pushState() })
+    onStarted: {
+      root.lastBeatMs = Date.now()
+      killEscalateTimer.stop()
+      Qt.callLater(function() { root.pushState() })
+    }
     onExited: function(code) {
+      killEscalateTimer.stop()
       if (code !== 0 && root.lastError === "")
         root.lastError = "lotusd exited (" + code + ")"
+      restartTimer.interval = root.restartDelayMs
+      root.restartDelayMs = Math.min(root.restartDelayMs * 2, 30000)
       restartTimer.restart()
     }
   }
 
   Process {
-    id: stateDirProcess
-    command: ["mkdir", "-p", root.stateDir]
+    id: settingsLoadProcess
+    command: ["python3", "-u", root.daemonPath, "--load-settings"]
+    stdout: StdioCollector {
+      onStreamFinished: root.loadedSettingsText = text
+    }
     onExited: function(code) {
-      root.stateDirReady = code === 0
-      if (root.stateDirReady) root.flushSettings()
+      if (code !== 0) root.loadedSettingsText = ""
+      root.settingsFileLoaded = true
+      root.initializeIfReady()
+    }
+  }
+
+  Process {
+    id: settingsSaveProcess
+    stdinEnabled: true
+    onStarted: settingsSaveProcess.write(JSON.stringify(root.settings) + "\n")
+    onExited: function(code) {
+      if (root.settingsSavePending) root.flushSettings()
     }
   }
 
@@ -296,24 +354,6 @@ Item {
       } else {
         root.lastError = "Udev install cancelled or failed"
       }
-    }
-  }
-
-  FileView {
-    id: settingsFile
-    path: root.settingsPath
-    watchChanges: false
-    atomicWrites: true
-    printErrors: false
-    onLoaded: {
-      root.loadedSettingsText = text()
-      root.settingsFileLoaded = true
-      root.initializeIfReady()
-    }
-    onLoadFailed: {
-      root.loadedSettingsText = ""
-      root.settingsFileLoaded = true
-      root.initializeIfReady()
     }
   }
 
@@ -334,5 +374,24 @@ Item {
     id: restartTimer
     interval: 1500
     onTriggered: root.ensureDaemon()
+  }
+
+  Timer {
+    id: watchdogTimer
+    interval: 1000
+    repeat: true
+    running: daemon.running
+    onTriggered: {
+      if (root.lastBeatMs > 0 && Date.now() - root.lastBeatMs > root.watchdogMs)
+        root.killDaemon()
+    }
+  }
+
+  Timer {
+    id: killEscalateTimer
+    interval: 800
+    onTriggered: {
+      if (daemon.running) daemon.signal(9)
+    }
   }
 }

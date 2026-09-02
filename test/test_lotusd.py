@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
+import base64
+import os
 import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -59,6 +63,11 @@ class ProtocolTests(unittest.TestCase):
         grid[8][33] = 15
         back = L.decode_preview(L.encode_preview(grid))
         self.assertEqual(back, grid)
+        self.assertEqual(len(base64.b64decode(L.encode_preview(grid))), 9 * 34)
+
+    def test_preview_rejects_wrong_size(self):
+        with self.assertRaises(ValueError):
+            L.decode_preview(base64.b64encode(b"short").decode("ascii"))
 
 
 class AutoModeTests(unittest.TestCase):
@@ -187,6 +196,74 @@ class UdevInstallTests(unittest.TestCase):
         self.assertNotIn("/bin/sh", qml)
         self.assertIn('"pkexec", "python3", "-c"', qml)
         self.assertNotIn("install -m 644", qml)
+        self.assertNotIn("FileView", qml)
+        self.assertIn("--load-settings", qml)
+        self.assertIn("watchdogMs", qml)
+        self.assertIn("previewBytes: 306", qml)
+
+
+class SerialIoTests(unittest.TestCase):
+    def test_write_all_times_out_on_full_pipe(self):
+        r, w = os.pipe()
+        os.set_blocking(w, False)
+        blob = b"x" * 65536
+        try:
+            while True:
+                os.write(w, blob)
+        except BlockingIOError:
+            pass
+        t0 = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            L.write_all(w, b"more", timeout=0.05)
+        self.assertLess(time.monotonic() - t0, 1.0)
+        os.close(r)
+        os.close(w)
+
+
+class SettingsIoTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        os.chmod(self.dir, 0o700)
+        os.environ["LOTUS_STATE_DIR"] = str(self.dir)
+
+    def tearDown(self):
+        os.environ.pop("LOTUS_STATE_DIR", None)
+        self.tmp.cleanup()
+
+    def test_roundtrip(self):
+        payload = b'{"mode":"clock","power":true}\n'
+        L.save_settings_bytes(payload)
+        self.assertEqual(L.load_settings_bytes(), payload)
+
+    def test_missing_is_none(self):
+        self.assertIsNone(L.load_settings_bytes())
+
+    def test_rejects_oversize(self):
+        (self.dir / "lotus.json").write_bytes(b"x" * (L.MAX_SETTINGS_BYTES + 1))
+        with self.assertRaises(OSError):
+            L.load_settings_bytes()
+
+    def test_rejects_fifo(self):
+        os.mkfifo(self.dir / "lotus.json")
+        with self.assertRaises(OSError):
+            L.load_settings_bytes()
+
+    def test_rejects_symlink(self):
+        target = self.dir / "target.json"
+        target.write_text("{}")
+        os.symlink("target.json", self.dir / "lotus.json")
+        with self.assertRaises(OSError):
+            L.load_settings_bytes()
+
+    def test_read_text_truncates(self):
+        p = self.dir / "field"
+        p.write_text("a" * 200)
+        self.assertEqual(len(L.read_text(p)), L.MAX_SYSFS_FIELD)
+
+    def test_device_cap(self):
+        self.assertEqual(L.MAX_DEVICES, 4)
+        self.assertEqual(L.PREVIEW_RAW_BYTES, 306)
 
 
 if __name__ == "__main__":

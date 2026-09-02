@@ -8,11 +8,14 @@ No third-party Python packages — stdlib only.
 from __future__ import annotations
 
 import argparse
+import array
 import base64
+import fcntl
 import json
 import math
 import os
 import select
+import stat
 import sys
 import termios
 import time
@@ -22,6 +25,7 @@ from typing import Callable
 
 WIDTH = 9
 HEIGHT = 34
+PREVIEW_RAW_BYTES = WIDTH * HEIGHT
 MAGIC = bytes((0x32, 0xAC))
 CMD_BRIGHTNESS = 0x00
 CMD_PATTERN = 0x01
@@ -36,6 +40,13 @@ PREVIEW_HZ = 10
 KEEPALIVE_S = 25.0
 DISCOVER_S = 2.0
 VERSION = 1
+MAX_DEVICES = 4
+MAX_SYSFS_FIELD = 64
+MAX_LINE_BYTES = 8192
+MAX_STDIN_BUF = 16384
+MAX_SETTINGS_BYTES = 4096
+SERIAL_IO_S = 0.4
+SETTINGS_NAME = "lotus.json"
 
 MODES = (
     "auto",
@@ -211,14 +222,15 @@ def encode_preview(grid: list[list[int]]) -> str:
 
 
 def decode_preview(b64: str) -> list[list[int]]:
-    raw = base64.b64decode(b64)
+    raw = base64.b64decode(b64, validate=True)
+    if len(raw) != PREVIEW_RAW_BYTES:
+        raise ValueError("preview must be exactly 9x34 bytes")
     grid = new_grid()
     i = 0
     for y in range(HEIGHT):
         for x in range(WIDTH):
-            if i < len(raw):
-                grid[x][y] = raw[i]
-                i += 1
+            grid[x][y] = raw[i]
+            i += 1
     return grid
 
 
@@ -624,14 +636,17 @@ def apply_message(state: State, msg: dict, ts: float) -> State:
         for item in msg["workspaces"]:
             if not isinstance(item, dict):
                 continue
+            wid = int(item.get("id") or 0)
+            if wid < 1 or wid > 10:
+                continue
             cleaned.append(
                 {
-                    "id": int(item.get("id") or 0),
+                    "id": wid,
                     "occupied": bool(item.get("occupied")),
                     "focused": bool(item.get("focused")),
                 }
             )
-        state.workspaces = cleaned
+        state.workspaces = cleaned[:10]
     if "playing" in msg:
         state.playing = bool(msg["playing"])
     if "sleepLocked" in msg:
@@ -700,11 +715,24 @@ class Device:
         return {"path": self.path, "panel": self.panel, "serial": self.serial}
 
 
-def read_text(path: Path) -> str:
+def read_text(path: Path, limit: int = MAX_SYSFS_FIELD) -> str:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        return path.read_text().strip()
+        fd = os.open(path, flags)
     except OSError:
         return ""
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return ""
+        data = os.read(fd, limit)
+        return data.decode("utf-8", "replace").strip()[:limit]
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
 
 
 def usb_device_dir(tty_name: str) -> Path | None:
@@ -740,7 +768,15 @@ def discover_devices() -> list[dict]:
             continue
         panel = read_text(usb / "physical_location" / "panel") or "unknown"
         serial = read_text(usb / "serial")
-        found.append({"path": str(entry), "panel": panel, "serial": serial})
+        found.append(
+            {
+                "path": str(entry)[:MAX_SYSFS_FIELD],
+                "panel": panel[:MAX_SYSFS_FIELD],
+                "serial": serial[:MAX_SYSFS_FIELD],
+            }
+        )
+        if len(found) >= MAX_DEVICES:
+            break
     return found
 
 
@@ -760,24 +796,205 @@ def configure_serial(fd: int) -> None:
 
 
 def open_device(path: str) -> int:
-    import fcntl
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        configure_serial(fd)
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        return fd
+    except OSError:
+        os.close(fd)
+        raise
 
-    fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-    configure_serial(fd)
-    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-    fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
-    return fd
+
+def _deadline_remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("serial I/O timeout")
+    return remaining
 
 
-def write_all(fd: int, data: bytes) -> None:
+def drain_output(fd: int, deadline: float) -> None:
+    queued = array.array("i", [0])
+    while True:
+        remaining = _deadline_remaining(deadline)
+        try:
+            fcntl.ioctl(fd, termios.TIOCOUTQ, queued, True)
+        except OSError:
+            return
+        if queued[0] <= 0:
+            return
+        select.select([], [fd], [], min(0.02, remaining))
+
+
+def write_all(fd: int, data: bytes, timeout: float = SERIAL_IO_S) -> None:
+    deadline = time.monotonic() + timeout
     view = memoryview(data)
     while view:
-        n = os.write(fd, view)
+        remaining = _deadline_remaining(deadline)
+        _, writable, _ = select.select([], [fd], [], remaining)
+        if not writable:
+            raise TimeoutError("serial write timeout")
+        try:
+            n = os.write(fd, view)
+        except BlockingIOError:
+            continue
         if n <= 0:
             raise OSError("short write")
         view = view[n:]
-    # Push this command out as its own USB transfer before the next one.
-    termios.tcdrain(fd)
+    drain_output(fd, deadline)
+
+
+def state_dir() -> Path:
+    override = os.environ.get("LOTUS_STATE_DIR")
+    if override:
+        return Path(override)
+    home = os.environ.get("HOME") or ""
+    base = os.environ.get("XDG_STATE_HOME") or str(Path(home) / ".local" / "state")
+    return Path(base) / "omarchy"
+
+
+def ensure_state_dir() -> Path:
+    path = state_dir()
+    uid = os.getuid()
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+        raise OSError("untrusted state directory")
+    os.chmod(path, 0o700)
+    return path
+
+
+def _open_state_dir() -> int:
+    path = ensure_state_dir()
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        os.close(fd)
+        raise OSError("untrusted state directory")
+    return fd
+
+
+def _read_bounded(fd: int, max_bytes: int, timeout: float = 0.2) -> bytes:
+    deadline = time.monotonic() + timeout
+    data = bytearray()
+    while len(data) <= max_bytes:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        readable, _, _ = select.select([fd], [], [], remaining)
+        if not readable:
+            break
+        try:
+            chunk = os.read(fd, min(1024, max_bytes + 1 - len(data)))
+        except BlockingIOError:
+            continue
+        if not chunk:
+            break
+        data.extend(chunk)
+        if len(data) > max_bytes:
+            raise OSError("settings file too large")
+    return bytes(data)
+
+
+def load_settings_bytes() -> bytes | None:
+    dirfd = _open_state_dir()
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(SETTINGS_NAME, flags, dir_fd=dirfd)
+    except FileNotFoundError:
+        os.close(dirfd)
+        return None
+    except OSError:
+        os.close(dirfd)
+        raise
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+            raise OSError("untrusted settings file")
+        if st.st_size > MAX_SETTINGS_BYTES:
+            raise OSError("settings file too large")
+        return _read_bounded(fd, MAX_SETTINGS_BYTES)
+    finally:
+        os.close(fd)
+        os.close(dirfd)
+
+
+def save_settings_bytes(data: bytes) -> None:
+    if len(data) > MAX_SETTINGS_BYTES:
+        raise OSError("settings payload too large")
+    dirfd = _open_state_dir()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    tmp = "." + SETTINGS_NAME + ".tmp"
+    try:
+        fd = os.open(tmp, flags, 0o600, dir_fd=dirfd)
+        try:
+            view = memoryview(data)
+            while view:
+                n = os.write(fd, view)
+                if n <= 0:
+                    raise OSError("short write")
+                view = view[n:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, SETTINGS_NAME, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+    finally:
+        os.close(dirfd)
+
+
+def read_stdin_line(max_bytes: int = MAX_SETTINGS_BYTES, timeout: float = 2.0) -> bytes:
+    fd = sys.stdin.fileno()
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+    deadline = time.monotonic() + timeout
+    buf = bytearray()
+    while len(buf) <= max_bytes:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        readable, _, _ = select.select([fd], [], [], remaining)
+        if not readable:
+            break
+        chunk = os.read(fd, 1024)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if b"\n" in buf:
+            break
+    if len(buf) > max_bytes:
+        raise OSError("settings payload too large")
+    return bytes(buf).split(b"\n", 1)[0]
+
+
+def cmd_load_settings() -> int:
+    try:
+        data = load_settings_bytes()
+    except OSError:
+        return 1
+    if data:
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+    return 0
+
+
+def cmd_save_settings() -> int:
+    try:
+        data = read_stdin_line()
+        save_settings_bytes(data)
+    except OSError:
+        return 1
+    return 0
 
 
 class Hardware:
@@ -910,12 +1127,18 @@ def run_daemon() -> int:
             ready, _, _ = select.select([sys.stdin], [], [], timeout)
             ts = time.time()
             if ready:
-                chunk = os.read(sys.stdin.fileno(), 65536)
+                chunk = os.read(sys.stdin.fileno(), 4096)
                 if not chunk:
                     break
                 buf += chunk.decode("utf-8", "replace")
+                if len(buf) > MAX_STDIN_BUF:
+                    nl = buf.find("\n")
+                    buf = buf[nl + 1 :] if nl >= 0 else ""
                 while "\n" in buf:
                     line, buf = buf.split("\n", 1)
+                    if len(line) > MAX_LINE_BYTES:
+                        emit({"type": "error", "message": "line too long"})
+                        continue
                     line = line.strip()
                     if not line:
                         continue
@@ -958,7 +1181,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Framework 16 LED matrix daemon for Lotus")
     parser.add_argument("--list", action="store_true", help="list LED matrix devices and exit")
     parser.add_argument("--render", choices=MODES, help="print one ASCII frame of a mode")
+    parser.add_argument("--load-settings", action="store_true", help="print lotus.json from the private state dir")
+    parser.add_argument("--save-settings", action="store_true", help="write one stdin line to lotus.json")
     args = parser.parse_args(argv)
+    if args.load_settings:
+        return cmd_load_settings()
+    if args.save_settings:
+        return cmd_save_settings()
     if args.list:
         for d in discover_devices():
             print(f"{d['path']}\tpanel={d['panel']}\tserial={d['serial']}")
