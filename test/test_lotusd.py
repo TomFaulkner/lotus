@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import os
+import stat
 import sys
 import tempfile
 import time
@@ -253,6 +254,27 @@ class SettingsIoTests(unittest.TestCase):
         target = self.dir / "target.json"
         target.write_text("{}")
         os.symlink("target.json", self.dir / "lotus.json")
+        with self.assertRaises(OSError):
+            L.load_settings_bytes()
+
+    def test_save_ignores_preexisting_tmp_fifo(self):
+        fifo = self.dir / ".lotus.json.tmp"
+        os.mkfifo(fifo)
+        payload = b'{"mode":"clock"}\n'
+        L.save_settings_bytes(payload)
+        self.assertTrue(stat.S_ISFIFO(os.lstat(fifo).st_mode))
+        self.assertTrue(stat.S_ISREG(os.lstat(self.dir / "lotus.json").st_mode))
+        self.assertEqual(L.load_settings_bytes(), payload)
+
+    def test_parent_symlink_rejected(self):
+        real = self.dir / "real"
+        real.mkdir()
+        os.chmod(real, 0o700)
+        link = self.dir / "link"
+        link.symlink_to(real)
+        os.environ["LOTUS_STATE_DIR"] = str(link / "omarchy")
+        with self.assertRaises(OSError):
+            L.save_settings_bytes(b"{}\n")
         with self.assertRaises(OSError):
             L.load_settings_bytes()
 

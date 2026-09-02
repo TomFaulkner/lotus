@@ -845,6 +845,9 @@ def write_all(fd: int, data: bytes, timeout: float = SERIAL_IO_S) -> None:
     drain_output(fd, deadline)
 
 
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+
+
 def state_dir() -> Path:
     override = os.environ.get("LOTUS_STATE_DIR")
     if override:
@@ -854,31 +857,74 @@ def state_dir() -> Path:
     return Path(base) / "omarchy"
 
 
-def ensure_state_dir() -> Path:
-    path = state_dir()
-    uid = os.getuid()
+def _state_root_and_parts() -> tuple[str, list[str]]:
+    override = os.environ.get("LOTUS_STATE_DIR")
+    if override:
+        path = Path(override)
+    else:
+        home = os.environ.get("HOME") or ""
+        if not home:
+            raise OSError("HOME is unset")
+        xdg = os.environ.get("XDG_STATE_HOME")
+        path = (Path(xdg) / "omarchy") if xdg else (Path(home) / ".local" / "state" / "omarchy")
+    if not path.is_absolute():
+        raise OSError("state directory must be absolute")
+    parts = list(path.parts)
+    root, rest = parts[0], parts[1:]
+    if not rest:
+        raise OSError("refusing filesystem root as state dir")
+    for name in rest:
+        if name in ("", ".", ".."):
+            raise OSError("illegal path component")
+    return root, rest
+
+
+def _openat_dir(dirfd: int, name: str, *, create: bool, require_owner: bool, uid: int) -> int:
+    if name in ("", ".", "..") or "/" in name or "\0" in name:
+        raise OSError("illegal path component")
     try:
-        st = os.lstat(path)
+        fd = os.open(name, _DIR_FLAGS, dir_fd=dirfd)
     except FileNotFoundError:
-        path.mkdir(mode=0o700, parents=True, exist_ok=True)
-        st = os.lstat(path)
-    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
-        raise OSError("untrusted state directory")
-    os.chmod(path, 0o700)
-    return path
+        if not create:
+            raise
+        try:
+            os.mkdir(name, 0o700, dir_fd=dirfd)
+        except FileExistsError:
+            pass
+        fd = os.open(name, _DIR_FLAGS, dir_fd=dirfd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode):
+            raise OSError("not a directory")
+        if require_owner and st.st_uid != uid:
+            raise OSError("untrusted owner")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
 
 
 def _open_state_dir() -> int:
-    path = ensure_state_dir()
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags)
-    st = os.fstat(fd)
-    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+    uid = os.getuid()
+    root, parts = _state_root_and_parts()
+    fd = os.open(root, _DIR_FLAGS)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode):
+            raise OSError("not a directory")
+        for i, name in enumerate(parts):
+            leaf = i == len(parts) - 1
+            child = _openat_dir(fd, name, create=leaf, require_owner=leaf, uid=uid)
+            os.close(fd)
+            fd = child
+        os.fchmod(fd, 0o700)
+        st = os.fstat(fd)
+        if st.st_uid != uid or not stat.S_ISDIR(st.st_mode):
+            raise OSError("untrusted state directory")
+        return fd
+    except Exception:
         os.close(fd)
-        raise OSError("untrusted state directory")
-    return fd
+        raise
 
 
 def _read_bounded(fd: int, max_bytes: int, timeout: float = 0.2) -> bytes:
@@ -928,28 +974,72 @@ def load_settings_bytes() -> bytes | None:
         os.close(dirfd)
 
 
+def _write_all_fd(fd: int, data: bytes, timeout: float = 0.5) -> None:
+    deadline = time.monotonic() + timeout
+    view = memoryview(data)
+    while view:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("settings write timeout")
+        _, writable, _ = select.select([], [fd], [], remaining)
+        if not writable:
+            raise TimeoutError("settings write timeout")
+        try:
+            n = os.write(fd, view)
+        except BlockingIOError:
+            continue
+        if n <= 0:
+            raise OSError("short write")
+        view = view[n:]
+
+
 def save_settings_bytes(data: bytes) -> None:
     if len(data) > MAX_SETTINGS_BYTES:
         raise OSError("settings payload too large")
+    uid = os.getuid()
     dirfd = _open_state_dir()
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    tmp = "." + SETTINGS_NAME + ".tmp"
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | os.O_CLOEXEC
+        | os.O_NONBLOCK
+        | os.O_NOFOLLOW
+    )
+    tmp = None
+    fd = None
     try:
-        fd = os.open(tmp, flags, 0o600, dir_fd=dirfd)
-        try:
-            view = memoryview(data)
-            while view:
-                n = os.write(fd, view)
-                if n <= 0:
-                    raise OSError("short write")
-                view = view[n:]
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        for _ in range(8):
+            candidate = f".lotus.{os.getpid()}.{time.time_ns()}.tmp"
+            try:
+                fd = os.open(candidate, flags, 0o600, dir_fd=dirfd)
+                tmp = candidate
+                break
+            except FileExistsError:
+                continue
+        if fd is None or tmp is None:
+            raise OSError("could not create exclusive temp file")
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != uid or st.st_nlink != 1:
+            raise OSError("untrusted temp file")
+        os.fchmod(fd, 0o600)
+        _write_all_fd(fd, data)
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
         os.replace(tmp, SETTINGS_NAME, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        tmp = None
     finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp is not None:
+            try:
+                os.unlink(tmp, dir_fd=dirfd)
+            except OSError:
+                pass
         os.close(dirfd)
 
 
